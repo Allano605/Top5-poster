@@ -1,4 +1,4 @@
-    """
+"""
 Top 5 Match Pick — Auto Alert Bot (with trained ML model for Over/Under 2.5)
 ------------------------------------------------------------------------------
 Same as before: pulls TODAY's fixtures from API-Football for the top 5
