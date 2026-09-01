@@ -2,6 +2,6 @@ python-telegram-bot==20.8
 flask
 gunicorn
 requests
-scikit-learn
+scikit-learn==1.6.1
 joblib
 numpy
