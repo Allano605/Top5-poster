@@ -4,30 +4,6 @@ Top 5 Match Pick — Auto Alert Bot (with trained ML model for Over/Under 2.5)
 Same as before: pulls TODAY's fixtures from API-Football for the top 5
 leagues, checks kickoff timing, sends a Telegram alert 30 min before each
 match. form_bot and odds_bot are unchanged.
-
-WHAT'S NEW:
-- ml_bot no longer uses simple odds-math. It now loads a real trained
-  machine learning model (over25_model.pkl), trained on 10,735 real
-  historical matches from the top 5 leagues (2018-2025), using features
-  like recent form, shots, corners, head-to-head history, rest days, and
-  attack/defense strength relative to league average.
-- The model predicts the probability of Over 2.5 Goals specifically.
-  Test-set accuracy: ~57.6%, vs a 54.1% baseline (always guessing the more
-  common outcome) — a real, modest edge, not a guarantee.
-- Because this model needs LIVE match-stats inputs (shots, corners, etc.)
-  which aren't available before a match starts, we approximate today's
-  fixture's inputs using each team's most recent rolling averages fetched
-  fresh from the API-Football historical fixtures endpoint at alert time.
-- odds_bot still shows live bookmaker odds pulled from the API, unchanged.
-- Combined Pick logic is unchanged (goal-average heuristic).
-
-HONESTY NOTE FOR CHANNEL POSTS: describe ml_bot as a trained prediction
-model based on match statistics, not as a guarantee or as beating bookmaker
-odds. The listed win-rate is a genuine backtested figure, not inflated.
-
-SETUP ON RENDER: same as before — no changes to Environment Variables or
-Start Command needed. Just ensure requirements.txt includes scikit-learn
-and joblib (see updated requirements.txt).
 """
 
 import os
@@ -38,15 +14,13 @@ import requests
 import joblib
 import numpy as np
 from datetime import datetime, timezone
-from flask import Flask
+from flask import Flask, request
 
 # ---------- CONFIG ----------
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHANNEL_ID = os.environ["CHANNEL_ID"]
 API_KEY = os.environ["FOOTBALL_API_KEY"]
 
-# Optional: affiliate link for monetization. Leave unset until you have one —
-# if AFFILIATE_LINK is empty, the bot simply omits the promo line, no errors.
 AFFILIATE_LINK = os.environ.get("AFFILIATE_LINK", "")
 
 API_HOST = "https://v3.football.api-sports.io"
@@ -72,13 +46,35 @@ ALERT_WINDOW_MIN = 25
 ALERT_WINDOW_MAX = 35
 CHECK_INTERVAL_SECONDS = 300
 
-# ---------- LOAD TRAINED MODEL ----------
+PENDING_FILE = "pending_subs.json"
+FLW_SECRET_HASH = os.environ.get("FLW_SECRET_HASH", "")
+
+TIER_CHANNELS = {
+    "silver": os.environ.get("SILVER_CHANNEL_ID", ""),
+    "gold": os.environ.get("GOLD_CHANNEL_ID", ""),
+    "vip": os.environ.get("VIP_CHANNEL_ID", ""),
+}
+TIER_PAY_LINKS = {
+    "silver": os.environ.get("SILVER_PAY_LINK", ""),
+    "gold": os.environ.get("GOLD_PAY_LINK", ""),
+    "vip": os.environ.get("VIP_PAY_LINK", ""),
+}
+TIER_PRICES = {"silver": "N3,000/month", "gold": "N6,000/month", "vip": "N10,000/month"}
+
+def load_pending():
+    if os.path.exists(PENDING_FILE):
+        with open(PENDING_FILE, "r") as f:
+            return json.load(f)
+    return {}
+
+def save_pending(data):
+    with open(PENDING_FILE, "w") as f:
+        json.dump(data, f)
+
 ML_MODEL = joblib.load("over25_model.pkl")
 ML_FEATURE_COLS = joblib.load("over25_model_features.pkl")
 print(f"Loaded ML model with {len(ML_FEATURE_COLS)} features.")
 
-
-# ---------- SENT-TRACKING ----------
 def load_sent():
     if os.path.exists(SENT_FILE):
         with open(SENT_FILE, "r") as f:
@@ -93,8 +89,6 @@ def cleanup_old_sent(sent):
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     return {k: v for k, v in sent.items() if v.get("date") == today}
 
-
-# ---------- API CALLS ----------
 def get_current_season():
     now = datetime.now(timezone.utc)
     return now.year if now.month >= 7 else now.year - 1
@@ -129,7 +123,6 @@ def fetch_odds(fixture_id):
         return None
 
 def fetch_recent_matches(team_id, last_n=10):
-    """Fetch a team's recent matches with stats, used to build ML features."""
     resp = requests.get(
         f"{API_HOST}/fixtures",
         headers=HEADERS,
@@ -137,10 +130,7 @@ def fetch_recent_matches(team_id, last_n=10):
     )
     return resp.json().get("response", [])
 
-
-# ---------- BUILD FEATURES FOR ML PREDICTION ----------
 def compute_rolling_stats(matches, team_id):
-    """From a list of past fixtures, compute goals/shots/corners/rest-day features."""
     goals_for, goals_against = [], []
     dates = []
     for fx in matches:
@@ -176,14 +166,6 @@ def compute_rolling_stats(matches, team_id):
     }
 
 def build_ml_features(home_id, away_id, league_name, home_matches, away_matches):
-    """
-    Builds a feature row matching the trained model's expected columns.
-    Missing/unavailable inputs (like shots/corners rolling averages, which
-    require deeper historical data than the live API easily exposes) are
-    filled with neutral defaults rather than left blank, so the model can
-    still produce an estimate. Only the genuinely computable features
-    (goals, trend, rest days, league) are set from real live data.
-    """
     home_stats = compute_rolling_stats(home_matches, home_id)
     away_stats = compute_rolling_stats(away_matches, away_id)
 
@@ -223,14 +205,12 @@ def predict_over25_probability(home_id, away_id, league_name):
         features = build_ml_features(home_id, away_id, league_name, home_matches, away_matches)
         if features is None:
             return None
-        prob = ML_MODEL.predict_proba([features])[0][1]  # probability of Over 2.5
+        prob = ML_MODEL.predict_proba([features])[0][1]
         return round(prob * 100)
     except Exception as e:
         print("ML prediction failed:", e)
         return None
 
-
-# ---------- CALCULATIONS (odds_bot, unchanged) ----------
 def implied_probabilities(odds):
     if not odds or not all([odds.get("home"), odds.get("draw"), odds.get("away")]):
         return None
@@ -263,7 +243,7 @@ def build_combined_pick(home_avg_goals, away_avg_goals, home_name, away_name, ml
     if ml_over25_pct is not None and ml_over25_pct >= 60:
         return "Over 2.5 Goals (ML-supported)"
     if home_avg_goals >= 1 and away_avg_goals >= 1:
-        return "Both Teams to Score – Yes"
+        return "Both Teams to Score - Yes"
     elif total_avg >= 2.8:
         return "Over 2.5 Goals"
     elif total_avg >= 1.8:
@@ -275,15 +255,13 @@ def build_combined_pick(home_avg_goals, away_avg_goals, home_name, away_name, ml
     else:
         return "Under 3.5 Goals"
 
-
-# ---------- MESSAGE FORMAT ----------
 def format_message(fx, odds, probs, home_form, away_form, pick, ml_over25_pct):
     home = fx["teams"]["home"]["name"]
     away = fx["teams"]["away"]["name"]
     league = fx["_league_name"]
     kickoff_local = fx["_kickoff_dt"].strftime("%H:%M UTC")
 
-    odds_str = f"{home} {odds['home']} • DRAW {odds['draw']} • {away} {odds['away']}" if odds else "N/A"
+    odds_str = f"{home} {odds['home']} - DRAW {odds['draw']} - {away} {odds['away']}" if odds else "N/A"
 
     if ml_over25_pct is not None:
         ml_str = f"Over 2.5 Goals: {ml_over25_pct}% (trained model, ~58% backtested accuracy)"
@@ -291,29 +269,112 @@ def format_message(fx, odds, probs, home_form, away_form, pick, ml_over25_pct):
         ml_str = "N/A (insufficient recent data)"
 
     message = (
-        f"⚽ *{home} vs {away}* — {kickoff_local} — {league}\n"
-        f"• form_bot: {home[:3].upper()} {home_form} | {away[:3].upper()} {away_form}\n"
-        f"• odds_bot: {odds_str}\n"
-        f"• ml_bot: {ml_str}\n"
-        f"• Combined Pick: {pick}\n"
-        f"\n⏰ Kickoff in ~30 minutes"
+        f"{home} vs {away} - {kickoff_local} - {league}\n"
+        f"form_bot: {home[:3].upper()} {home_form} | {away[:3].upper()} {away_form}\n"
+        f"odds_bot: {odds_str}\n"
+        f"ml_bot: {ml_str}\n"
+        f"Combined Pick: {pick}\n"
+        f"\nKickoff in ~30 minutes"
     )
 
     if AFFILIATE_LINK:
-        message += f"\n\n🎯 Place your bet: {AFFILIATE_LINK}\n18+ | Bet responsibly"
+        message += f"\n\nPlace your bet: {AFFILIATE_LINK}\n18+ | Bet responsibly"
 
     return message
 
-
-# ---------- TELEGRAM ----------
-def send_telegram(text):
+def send_telegram(text, chat_id=None):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    resp = requests.post(url, data={"chat_id": CHANNEL_ID, "text": text, "parse_mode": "Markdown"})
+    resp = requests.post(url, data={"chat_id": chat_id or CHANNEL_ID, "text": text, "parse_mode": "Markdown"})
     if not resp.ok:
         print("Telegram send failed:", resp.text)
 
+def create_invite_link(channel_id):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/createChatInviteLink"
+    resp = requests.post(url, data={"chat_id": channel_id, "member_limit": 1})
+    data = resp.json()
+    if data.get("ok"):
+        return data["result"]["invite_link"]
+    print("Invite link creation failed:", data)
+    return None
 
-# ---------- CORE CHECK ----------
+def handle_incoming_message(update):
+    message = update.get("message", {})
+    text = message.get("text", "")
+    chat_id = message.get("chat", {}).get("id")
+
+    if not text or not chat_id:
+        return
+
+    if text.startswith("/subscribe"):
+        parts = text.strip().split()
+        tier = parts[1].lower() if len(parts) > 1 else None
+
+        if tier not in TIER_PAY_LINKS or not TIER_PAY_LINKS[tier]:
+            send_telegram(
+                "Choose a tier: /subscribe silver, /subscribe gold, or /subscribe vip",
+                chat_id=chat_id,
+            )
+            return
+
+        send_telegram(
+            f"{tier.upper()} - {TIER_PRICES[tier]}\n\n"
+            f"1. Pay here: {TIER_PAY_LINKS[tier]}\n"
+            f"2. Use this exact code as your payment description/note: {chat_id}\n"
+            f"3. Once payment confirms, you'll automatically get an invite link here - no waiting.",
+            chat_id=chat_id,
+        )
+
+        pending = load_pending()
+        pending[str(chat_id)] = {"tier": tier, "chat_id": chat_id}
+        save_pending(pending)
+
+    elif text.startswith("/start"):
+        send_telegram(
+            "Welcome to Top 5 Match Pick!\n\n"
+            "Type /subscribe silver, /subscribe gold, or /subscribe vip to unlock more daily analysis.",
+            chat_id=chat_id,
+        )
+
+def handle_flutterwave_webhook(payload):
+    try:
+        data = payload.get("data", {})
+        status = data.get("status")
+        narration = str(data.get("narration", "") or data.get("meta", {}).get("chat_id", ""))
+
+        if status != "successful":
+            return
+
+        pending = load_pending()
+        matched_chat_id = None
+        for key, entry in pending.items():
+            if str(entry["chat_id"]) in narration:
+                matched_chat_id = key
+                break
+
+        if not matched_chat_id:
+            print("No matching pending subscription found for this payment.")
+            return
+
+        entry = pending[matched_chat_id]
+        tier = entry["tier"]
+        channel_id = TIER_CHANNELS.get(tier)
+
+        if not channel_id:
+            print(f"No channel configured for tier: {tier}")
+            return
+
+        invite_link = create_invite_link(channel_id)
+        if invite_link:
+            send_telegram(
+                f"Payment confirmed! Here's your {tier.upper()} channel invite:\n{invite_link}\n\n"
+                f"(Link works once, for you only.)",
+                chat_id=entry["chat_id"],
+            )
+            del pending[matched_chat_id]
+            save_pending(pending)
+    except Exception as e:
+        print("Error handling Flutterwave webhook:", e)
+
 def check_and_send():
     sent = cleanup_old_sent(load_sent())
     now = datetime.now(timezone.utc)
@@ -350,8 +411,6 @@ def check_and_send():
 
     save_sent(sent)
 
-
-# ---------- BACKGROUND LOOP ----------
 def background_loop():
     while True:
         try:
@@ -360,13 +419,31 @@ def background_loop():
             print("Error during check_and_send:", e)
         time.sleep(CHECK_INTERVAL_SECONDS)
 
-
-# ---------- FLASK APP ----------
 app = Flask(__name__)
 
 @app.route("/")
 def home():
     return "Top 5 Match Pick bot is running (with trained ML model).", 200
+
+@app.route("/telegram-webhook", methods=["POST"])
+def telegram_webhook():
+    update = request.get_json(force=True, silent=True) or {}
+    try:
+        handle_incoming_message(update)
+    except Exception as e:
+        print("Error handling Telegram update:", e)
+    return "OK", 200
+
+@app.route("/flutterwave-webhook", methods=["POST"])
+def flutterwave_webhook():
+    signature = request.headers.get("verif-hash", "")
+    if not FLW_SECRET_HASH or signature != FLW_SECRET_HASH:
+        print("Flutterwave webhook: signature mismatch, ignoring.")
+        return "Unauthorized", 401
+
+    payload = request.get_json(force=True, silent=True) or {}
+    handle_flutterwave_webhook(payload)
+    return "OK", 200
 
 threading.Thread(target=background_loop, daemon=True).start()
 
