@@ -1,4 +1,4 @@
-"""
+    """
 Top 5 Match Pick — Auto Alert Bot (with trained ML model for Over/Under 2.5)
 ------------------------------------------------------------------------------
 Same as before: pulls TODAY's fixtures from API-Football for the top 5
@@ -44,6 +44,10 @@ from flask import Flask
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHANNEL_ID = os.environ["CHANNEL_ID"]
 API_KEY = os.environ["FOOTBALL_API_KEY"]
+
+# Optional: affiliate link for monetization. Leave unset until you have one —
+# if AFFILIATE_LINK is empty, the bot simply omits the promo line, no errors.
+AFFILIATE_LINK = os.environ.get("AFFILIATE_LINK", "")
 
 API_HOST = "https://v3.football.api-sports.io"
 HEADERS = {"x-apisports-key": API_KEY}
@@ -286,7 +290,7 @@ def format_message(fx, odds, probs, home_form, away_form, pick, ml_over25_pct):
     else:
         ml_str = "N/A (insufficient recent data)"
 
-    return (
+    message = (
         f"⚽ *{home} vs {away}* — {kickoff_local} — {league}\n"
         f"• form_bot: {home[:3].upper()} {home_form} | {away[:3].upper()} {away_form}\n"
         f"• odds_bot: {odds_str}\n"
@@ -294,6 +298,11 @@ def format_message(fx, odds, probs, home_form, away_form, pick, ml_over25_pct):
         f"• Combined Pick: {pick}\n"
         f"\n⏰ Kickoff in ~30 minutes"
     )
+
+    if AFFILIATE_LINK:
+        message += f"\n\n🎯 Place your bet: {AFFILIATE_LINK}\n18+ | Bet responsibly"
+
+    return message
 
 
 # ---------- TELEGRAM ----------
