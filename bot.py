@@ -1,4 +1,4 @@
-"""
+ """
 Top 5 Match Pick — Auto Alert Bot (with trained ML model for Over/Under 2.5)
 ------------------------------------------------------------------------------
 Same as before: pulls TODAY's fixtures from API-Football for the top 5
@@ -407,16 +407,86 @@ def check_and_send():
             send_telegram(message)
             print(f"Sent alert for {home_name} vs {away_name} (ML Over2.5: {ml_over25_pct}%)")
 
-            sent[fixture_id] = {"date": now.strftime("%Y-%m-%d")}
+            sent[fixture_id] = {
+                "date": now.strftime("%Y-%m-%d"),
+                "home": home_name,
+                "away": away_name,
+                "pick": pick,
+                "kickoff": kickoff_dt.isoformat(),
+                "result_posted": False,
+            }
 
     save_sent(sent)
+
+def fetch_fixture_result(fixture_id):
+    resp = requests.get(f"{API_HOST}/fixtures", headers=HEADERS, params={"id": fixture_id})
+    data = resp.json().get("response", [])
+    if not data:
+        return None
+    fx = data[0]
+    status = fx["fixture"]["status"]["short"]
+    if status != "FT":
+        return None
+    home_goals = fx["goals"]["home"]
+    away_goals = fx["goals"]["away"]
+    if home_goals is None or away_goals is None:
+        return None
+    return home_goals, away_goals
+
+def pick_won(pick, home_goals, away_goals):
+    total = home_goals + away_goals
+    if "Over 2.5" in pick:
+        return total > 2.5
+    if "Under" in pick:
+        return total < 3.5
+    if "Both Teams to Score" in pick:
+        return home_goals >= 1 and away_goals >= 1
+    return None  # Double Chance picks skipped — needs winner info, not just goals
+
+def check_results_and_post_wins():
+    sent = load_sent()
+    now = datetime.now(timezone.utc)
+    changed = False
+
+    for fixture_id, entry in sent.items():
+        if entry.get("result_posted"):
+            continue
+        if "kickoff" not in entry:
+            continue  # old entries from before this feature existed
+
+        kickoff_dt = datetime.fromisoformat(entry["kickoff"])
+        if (now - kickoff_dt).total_seconds() < 7200:
+            continue  # match likely still in progress, check again later
+
+        result = fetch_fixture_result(fixture_id)
+        if result is None:
+            continue
+
+        home_goals, away_goals = result
+        won = pick_won(entry["pick"], home_goals, away_goals)
+        entry["result_posted"] = True
+        changed = True
+
+        if won:
+            caption = (
+                f"Free tier caught this one 👀\n"
+                f"{entry['home']} {home_goals}-{away_goals} {entry['away']} — {entry['pick']} ✅\n"
+                f"Gold members ALSO got tomorrow's picks already loaded.\n"
+                f"No be everybody go see am first though."
+            )
+            send_telegram(caption)
+            print(f"Posted win for {entry['home']} vs {entry['away']}")
+
+    if changed:
+        save_sent(sent)
 
 def background_loop():
     while True:
         try:
             check_and_send()
+            check_results_and_post_wins()
         except Exception as e:
-            print("Error during check_and_send:", e)
+            print("Error during background_loop:", e)
         time.sleep(CHECK_INTERVAL_SECONDS)
 
 app = Flask(__name__)
@@ -449,4 +519,4 @@ threading.Thread(target=background_loop, daemon=True).start()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port)          
