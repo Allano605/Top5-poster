@@ -1,4 +1,4 @@
- """
+"""
 Top 5 Match Pick — Auto Alert Bot (with trained ML model for Over/Under 2.5)
 ------------------------------------------------------------------------------
 Same as before: pulls TODAY's fixtures from API-Football for the top 5
@@ -441,7 +441,7 @@ def pick_won(pick, home_goals, away_goals):
         return total < 3.5
     if "Both Teams to Score" in pick:
         return home_goals >= 1 and away_goals >= 1
-    return None  # Double Chance picks skipped — needs winner info, not just goals
+    return None
 
 def check_results_and_post_wins():
     sent = load_sent()
@@ -452,11 +452,11 @@ def check_results_and_post_wins():
         if entry.get("result_posted"):
             continue
         if "kickoff" not in entry:
-            continue  # old entries from before this feature existed
+            continue
 
         kickoff_dt = datetime.fromisoformat(entry["kickoff"])
         if (now - kickoff_dt).total_seconds() < 7200:
-            continue  # match likely still in progress, check again later
+            continue
 
         result = fetch_fixture_result(fixture_id)
         if result is None:
@@ -519,4 +519,4 @@ threading.Thread(target=background_loop, daemon=True).start()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)          
+    app.run(host="0.0.0.0", port=port)
